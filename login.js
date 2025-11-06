@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 
 const token = process.env.BOT_TOKEN;
 const chatId = process.env.CHAT_ID;
-const accounts = (process.env.ACCOUNTS || "").split(",")
+const accounts = (process.env.ACCOUNTS || "").split(";")
   .filter(x => x.trim())
   .map(item => {
     const [user, pass] = item.split(":");
@@ -18,7 +18,7 @@ async function sendTelegram(message) {
   const hkTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
   const timeStr = hkTime.toISOString().replace('T', ' ').substr(0, 19) + " HKT";
 
-  const fullMessage = `📌 Netlib 保活\n🕒 ${timeStr}\n\n${message}`;
+  const fullMessage = `📌 Netlib 登录通知\n🕒 ${timeStr}\n\n${message}`;
 
   try {
     await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -33,6 +33,7 @@ async function sendTelegram(message) {
 
 async function main() {
   if (accounts.length === 0) {
+    console.log('❌ 未配置账号');
     await sendTelegram('❌ 未配置账号');
     return;
   }
@@ -40,38 +41,106 @@ async function main() {
   console.log(`找到 ${accounts.length} 个账号`);
   let results = [];
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ 
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'] // 添加这些参数以提高稳定性
+  });
   
   for (const { user, pass } of accounts) {
+    let page;
     try {
-      const page = await browser.newPage();
-      await page.goto('https://www.netlib.re/');
+      page = await browser.newPage();
+      
+      // 增加超时设置
+      page.setDefaultTimeout(30000);
+      page.setDefaultNavigationTimeout(30000);
+      
+      console.log(`正在登录: ${user}`);
+      await page.goto('https://www.netlib.re/', { waitUntil: 'networkidle' });
       await page.waitForTimeout(3000);
       
-      await page.click('text=Login');
+      // 更健壮的选择器
+      await page.click('a:has-text("Login"), text=Login', { timeout: 5000 });
       await page.waitForTimeout(2000);
       
-      await page.fill('input[name="username"]', user);
-      await page.fill('input[name="password"]', pass);
-      await page.click('button:has-text("Validate")');
+      // 等待输入框出现
+      await page.waitForSelector('input[name="username"], input[type="text"]', { timeout: 5000 });
+      await page.fill('input[name="username"], input[type="text"]', user);
+      await page.waitForTimeout(1000);
       
+      await page.waitForSelector('input[name="password"], input[type="password"]', { timeout: 5000 });
+      await page.fill('input[name="password"], input[type="password"]', pass);
+      await page.waitForTimeout(1000);
+      
+      await page.click('button:has-text("Validate"), input[type="submit"]', { timeout: 5000 });
+      
+      // 等待页面加载完成
+      await page.waitForLoadState('networkidle');
       await page.waitForTimeout(5000);
       
-      if (await page.$('text=exclusive owner')) {
+      // 更健壮的成功检查
+      const successSelectors = [
+        'text=exclusive owner',
+        'text=You are the exclusive owner',
+        'text=Dashboard',
+        `text=${user}` // 页面显示用户名也算成功
+      ];
+      
+      let loginSuccess = false;
+      for (const selector of successSelectors) {
+        const element = await page.$(selector);
+        if (element) {
+          loginSuccess = true;
+          break;
+        }
+      }
+      
+      if (loginSuccess) {
         results.push(`✅ ${user}`);
         console.log(`${user} 登录成功`);
       } else {
-        results.push(`❌ ${user}`);
-        console.log(`${user} 登录失败`);
+        // 检查是否有错误信息
+        const errorSelectors = [
+          'text=Invalid',
+          'text=Error',
+          'text=Failed',
+          'text=incorrect'
+        ];
+        
+        let errorMsg = "未知错误";
+        for (const selector of errorSelectors) {
+          const element = await page.$(selector);
+          if (element) {
+            const text = await element.textContent();
+            errorMsg = text || "登录失败";
+            break;
+          }
+        }
+        
+        results.push(`❌ ${user} (${errorMsg})`);
+        console.log(`${user} 登录失败: ${errorMsg}`);
+        
+        // 保存截图用于调试
+        await page.screenshot({ path: `/tmp/${user}_error.png` });
+        console.log(`截图已保存: /tmp/${user}_error.png`);
       }
       
-      await page.close();
     } catch (e) {
-      results.push(`❌ ${user} (错误)`);
+      results.push(`❌ ${user} (异常: ${e.message})`);
       console.log(`${user} 登录异常: ${e.message}`);
+      
+      // 保存截图用于调试
+      if (page) {
+        await page.screenshot({ path: `/tmp/${user}_exception.png` });
+        console.log(`异常截图已保存: /tmp/${user}_exception.png`);
+      }
+    } finally {
+      if (page) {
+        await page.close();
+      }
     }
     
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
   }
   
   await browser.close();
@@ -79,4 +148,7 @@ async function main() {
   await sendTelegram(message);
 }
 
-main().catch(console.error);
+main().catch(async (error) => {
+  console.error('脚本执行失败:', error);
+  await sendTelegram(`💥 脚本执行失败: ${error.message}`);
+});
