@@ -3,14 +3,14 @@ const { chromium } = require('playwright');
 
 const token = process.env.BOT_TOKEN;
 const chatId = process.env.CHAT_ID;
-const account = process.env.ACCOUNT;
+const accounts = process.env.ACCOUNTS;
 
-if (!account) {
+if (!accounts) {
   console.log('❌ 未配置账号');
   process.exit(1);
 }
 
-const [user, pass] = account.split(":").map(s => s.trim());
+const [user, pass] = accounts.split(":").map(s => s.trim());
 if (!user || !pass) {
   console.log('❌ 账号格式错误，应为 username:password');
   process.exit(1);
